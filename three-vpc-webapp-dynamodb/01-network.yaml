@@ -1,0 +1,630 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Three VPCs connected through a central Transit Gateway with a public ALB in the Security VPC and private app tiers behind it
+
+Parameters:
+  SecurityVpcCidr:
+    Type: String
+    Default: 10.20.0.0/24
+    Description: CIDR block for the Security VPC
+
+  SecurityPublicSubnetCidr:
+    Type: String
+    Default: 10.20.0.0/26
+    Description: Public subnet A for the ALB in the Security VPC
+
+  SecurityPublicSubnetCidrB:
+    Type: String
+    Default: 10.20.0.128/26
+    Description: Public subnet B for the ALB in the Security VPC
+
+  SecurityPrivateSubnetCidr:
+    Type: String
+    Default: 10.20.0.64/26
+    Description: Private subnet in Security VPC used for TGW attachment and centralized egress
+
+  FrontendVpcCidr:
+    Type: String
+    Default: 10.21.0.0/24
+    Description: CIDR block for the Frontend VPC
+
+  FrontendSubnetCidr:
+    Type: String
+    Default: 10.21.0.0/24
+    Description: Subnet CIDR block for the Frontend subnet
+
+  BackendVpcCidr:
+    Type: String
+    Default: 10.22.0.0/24
+    Description: CIDR block for the Backend VPC
+
+  BackendSubnetCidr:
+    Type: String
+    Default: 10.22.0.0/24
+    Description: Subnet CIDR block for the Backend subnet
+
+Resources:
+  # =========================================================================
+  # Transit Gateway Hub
+  # =========================================================================
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      Description: Main hub for VPC-to-VPC connectivity
+      AutoAcceptSharedAttachments: disable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
+      Tags:
+        - Key: Name
+          Value: Main-TGW
+
+  TransitGatewayRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    DependsOn: TransitGateway
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: Main-TGW-RT
+
+  # =========================================================================
+  # Security VPC
+  # =========================================================================
+  SecurityVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref SecurityVpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Security-VPC
+
+  SecurityInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Security-IGW
+
+  SecurityVpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SecurityVPC
+      InternetGatewayId: !Ref SecurityInternetGateway
+
+  SecurityPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: !Ref SecurityPublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Security-Public-Subnet-A
+
+  SecurityPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: !Ref SecurityPublicSubnetCidrB
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Security-Public-Subnet-B
+
+  SecurityPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: !Ref SecurityPrivateSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Security-Private-Subnet
+
+  SecurityPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: Security-Public-RT
+
+  SecurityPublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: SecurityVpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref SecurityInternetGateway
+
+  SecurityPublicToFrontendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - SecurityTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPublicRouteTable
+      DestinationCidrBlock: !Ref FrontendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPublicToBackendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - SecurityTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPublicRouteTable
+      DestinationCidrBlock: !Ref BackendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: Security-Private-RT
+
+  SecurityToFrontendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - SecurityTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPrivateRouteTable
+      DestinationCidrBlock: !Ref FrontendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityToBackendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - SecurityTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPrivateRouteTable
+      DestinationCidrBlock: !Ref BackendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPublicSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityPublicSubnet
+      RouteTableId: !Ref SecurityPublicRouteTable
+
+  SecurityPublicSubnetBAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityPublicSubnetB
+      RouteTableId: !Ref SecurityPublicRouteTable
+
+  SecurityPrivateSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityPrivateSubnet
+      RouteTableId: !Ref SecurityPrivateRouteTable
+
+  SecurityTransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    DependsOn: TransitGateway
+    Properties:
+      SubnetIds:
+        - !Ref SecurityPrivateSubnet
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: Security-TGW-Attachment
+
+  SecurityTransitGatewayAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    DependsOn: SecurityTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref SecurityTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  SecurityTransitGatewayPropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    DependsOn: SecurityTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref SecurityTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  # =========================================================================
+  # Frontend VPC
+  # =========================================================================
+  FrontendVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref FrontendVpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Frontend-VPC
+
+  FrontendRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref FrontendVPC
+      Tags:
+        - Key: Name
+          Value: Frontend-RT
+
+  FrontendS3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref FrontendVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref FrontendRouteTable
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - arn:aws:s3:::*
+              - arn:aws:s3:::*/*
+      Tags:
+        - Key: Name
+          Value: Frontend-S3-Endpoint
+
+  FrontendDynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref FrontendVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref FrontendRouteTable
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: Frontend-DynamoDB-Endpoint
+
+  FrontendToSecurityRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - FrontendTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref FrontendRouteTable
+      DestinationCidrBlock: !Ref SecurityVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  FrontendToBackendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - FrontendTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref FrontendRouteTable
+      DestinationCidrBlock: !Ref BackendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  FrontendSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FrontendVPC
+      CidrBlock: !Ref FrontendSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Frontend-Subnet
+
+  FrontendSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref FrontendSubnet
+      RouteTableId: !Ref FrontendRouteTable
+
+  FrontendTransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    DependsOn: TransitGateway
+    Properties:
+      SubnetIds:
+        - !Ref FrontendSubnet
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref FrontendVPC
+      Tags:
+        - Key: Name
+          Value: Frontend-TGW-Attachment
+
+  FrontendTransitGatewayAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    DependsOn: FrontendTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref FrontendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  FrontendTransitGatewayPropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    DependsOn: FrontendTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref FrontendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  # =========================================================================
+  # Backend VPC
+  # =========================================================================
+  BackendVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref BackendVpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Backend-VPC
+
+  BackendRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BackendVPC
+      Tags:
+        - Key: Name
+          Value: Backend-RT
+
+  BackendToSecurityRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - BackendTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref BackendRouteTable
+      DestinationCidrBlock: !Ref SecurityVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  BackendToFrontendRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - TransitGateway
+      - BackendTransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref BackendRouteTable
+      DestinationCidrBlock: !Ref FrontendVpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  BackendSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref BackendVPC
+      CidrBlock: !Ref BackendSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Backend-Subnet
+
+  BackendSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref BackendSubnet
+      RouteTableId: !Ref BackendRouteTable
+
+  BackendTransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    DependsOn: TransitGateway
+    Properties:
+      SubnetIds:
+        - !Ref BackendSubnet
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref BackendVPC
+      Tags:
+        - Key: Name
+          Value: Backend-TGW-Attachment
+
+  BackendTransitGatewayAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    DependsOn: BackendTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref BackendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  BackendTransitGatewayPropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    DependsOn: BackendTransitGatewayAttachment
+    Properties:
+      TransitGatewayAttachmentId: !Ref BackendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TransitGatewayRouteSecurity:
+    Type: AWS::EC2::TransitGatewayRoute
+    DependsOn: SecurityTransitGatewayAttachment
+    Properties:
+      DestinationCidrBlock: !Ref SecurityVpcCidr
+      TransitGatewayAttachmentId: !Ref SecurityTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TransitGatewayRouteFrontend:
+    Type: AWS::EC2::TransitGatewayRoute
+    DependsOn: FrontendTransitGatewayAttachment
+    Properties:
+      DestinationCidrBlock: !Ref FrontendVpcCidr
+      TransitGatewayAttachmentId: !Ref FrontendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TransitGatewayRouteBackend:
+    Type: AWS::EC2::TransitGatewayRoute
+    DependsOn: BackendTransitGatewayAttachment
+    Properties:
+      DestinationCidrBlock: !Ref BackendVpcCidr
+      TransitGatewayAttachmentId: !Ref BackendTransitGatewayAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow management and HTTPS access to the security tier
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Security-SG
+
+  FrontendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP/HTTPS only from the Security VPC ALB tier for private frontend workloads
+      VpcId: !Ref FrontendVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref SecurityVpcCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref SecurityVpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Frontend-SG
+
+  BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow app traffic from the frontend and security VPCs across the Transit Gateway
+      VpcId: !Ref BackendVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref FrontendVpcCidr
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref SecurityVpcCidr
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref FrontendVpcCidr
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref SecurityVpcCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref FrontendVpcCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref SecurityVpcCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Backend-SG
+
+# =========================================================================
+# Stack Outputs
+# =========================================================================
+Outputs:
+  TransitGatewayId:
+    Value: !Ref TransitGateway
+    Export:
+      Name: Dev-TransitGatewayId
+
+  SecurityVpcId:
+    Value: !Ref SecurityVPC
+    Export:
+      Name: Dev-SecurityVpcId
+
+  FrontendVpcId:
+    Value: !Ref FrontendVPC
+    Export:
+      Name: Dev-FrontendVpcId
+
+  BackendVpcId:
+    Value: !Ref BackendVPC
+    Export:
+      Name: Dev-BackendVpcId
+
+  SecurityPublicSubnetId:
+    Value: !Ref SecurityPublicSubnet
+    Export:
+      Name: Dev-SecurityPublicSubnetId
+
+  SecurityPublicSubnetIdB:
+    Value: !Ref SecurityPublicSubnetB
+    Export:
+      Name: Dev-SecurityPublicSubnetIdB
+
+  SecurityPrivateSubnetId:
+    Value: !Ref SecurityPrivateSubnet
+    Export:
+      Name: Dev-SecurityPrivateSubnetId
+
+  FrontendSubnetId:
+    Value: !Ref FrontendSubnet
+    Export:
+      Name: Dev-FrontendSubnetId
+
+  FrontendRouteTableId:
+    Value: !Ref FrontendRouteTable
+    Export:
+      Name: Dev-FrontendRouteTableId
+
+  BackendSubnetId:
+    Value: !Ref BackendSubnet
+    Export:
+      Name: Dev-BackendSubnetId
+
+  BackendRouteTableId:
+    Value: !Ref BackendRouteTable
+    Export:
+      Name: Dev-BackendRouteTableId
+
+  TransitGatewayRouteTableId:
+    Value: !Ref TransitGatewayRouteTable
+    Export:
+      Name: Dev-TransitGatewayRouteTableId
+
+  FrontendSecurityGroupId:
+    Value: !Ref FrontendSecurityGroup
+    Export:
+      Name: Dev-FrontendSecurityGroupId
+
+  BackendSecurityGroupId:
+    Value: !Ref BackendSecurityGroup
+    Export:
+      Name: Dev-BackendSecurityGroupId

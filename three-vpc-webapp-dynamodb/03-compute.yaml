@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cheapest Amazon Linux EC2 instance in the Frontend VPC with nginx and AWS Console access via SSM
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.nano
+    Description: Lowest-cost practical EC2 instance type for the Frontend tier
+
+  AmazonLinuxAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI for eu-central-1
+
+  DynamoDBTableName:
+    Type: String
+    Default: BackendAppData
+    Description: DynamoDB table name containing the frontend HTML content
+
+  InstancePassword:
+    Type: String
+    NoEcho: true
+    Default: 'True123!'
+    Description: Password for the ec2-user account
+
+Resources:
+  FrontendInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: FrontendDynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !ImportValue Dev-BackendDynamoDBTableArn
+      Tags:
+        - Key: Name
+          Value: Frontend-Instance-Role
+
+  FrontendInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref FrontendInstanceRole
+
+  FrontendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmazonLinuxAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref FrontendInstanceProfile
+      SubnetId: !ImportValue Dev-FrontendSubnetId
+      SecurityGroupIds:
+        - !ImportValue Dev-FrontendSecurityGroupId
+      Monitoring: false
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 8
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          dnf update -y
+          dnf install -y nginx awscli
+          echo "ec2-user:${InstancePassword}" | chpasswd
+
+          export AWS_DEFAULT_REGION="${AWS::Region}"
+          TABLE_NAME="${DynamoDBTableName}"
+          PAGE_ID="homepage"
+          HTML_FILE="/usr/share/nginx/html/index.html"
+
+          systemctl enable nginx
+          systemctl start nginx
+
+          # 2. Fetch item from DynamoDB (returns "None" if key is missing)
+          HTML_VALUE=$(aws dynamodb get-item \
+            --table-name "$TABLE_NAME" \
+            --key '{"id":{"S":"'"$PAGE_ID"'"}}' \
+            --query 'Item.html.S' \
+            --output text 2>/dev/null || echo "None")
+
+          # 3. Check for BOTH empty string AND the string "None"
+          if [ -z "$HTML_VALUE" ] || [ "$HTML_VALUE" = "None" ]; then
+            HTML_VALUE='<h1>Frontend EC2 instance is running</h1><p>Content pulled from DynamoDB</p>'
+            aws dynamodb put-item \
+              --table-name "$TABLE_NAME" \
+              --item '{"id":{"S":"'"$PAGE_ID"'"},"html":{"S":"'"$HTML_VALUE"'"}}'
+          fi
+
+          printf '%s' "$HTML_VALUE" > "$HTML_FILE"
+          chown nginx:nginx "$HTML_FILE"
+          systemctl reload nginx
+      Tags:
+        - Key: Name
+          Value: Frontend-App-Server
+
+Outputs:
+  FrontendInstanceRoleArn:
+    Value: !GetAtt FrontendInstanceRole.Arn
+    Export:
+      Name: Dev-FrontendInstanceRoleArn
+
+  FrontendInstanceId:
+    Value: !Ref FrontendInstance
+    Export:
+      Name: Dev-FrontendInstanceId
+
+  FrontendInstancePrivateIp:
+    Value: !GetAtt FrontendInstance.PrivateIp
+    Export:
+      Name: Dev-FrontendInstancePrivateIp
