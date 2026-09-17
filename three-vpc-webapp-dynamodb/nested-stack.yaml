@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy the complete three-VPC web application as nested CloudFormation stacks
+
+Parameters:
+  SecurityVpcCidr:
+    Type: String
+    Default: 10.20.0.0/24
+  SecurityPublicSubnetCidr:
+    Type: String
+    Default: 10.20.0.0/26
+  SecurityPublicSubnetCidrB:
+    Type: String
+    Default: 10.20.0.128/26
+  SecurityPrivateSubnetCidr:
+    Type: String
+    Default: 10.20.0.64/26
+  FrontendVpcCidr:
+    Type: String
+    Default: 10.21.0.0/24
+  FrontendSubnetCidr:
+    Type: String
+    Default: 10.21.0.0/24
+  BackendVpcCidr:
+    Type: String
+    Default: 10.22.0.0/24
+  BackendSubnetCidr:
+    Type: String
+    Default: 10.22.0.0/24
+  TableName:
+    Type: String
+    Default: BackendAppData
+  InstanceType:
+    Type: String
+    Default: t3.nano
+  AmazonLinuxAmi:
+    Type: String
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstancePassword:
+    Type: String
+    NoEcho: true
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./01-network.yaml
+      Parameters:
+        SecurityVpcCidr: !Ref SecurityVpcCidr
+        SecurityPublicSubnetCidr: !Ref SecurityPublicSubnetCidr
+        SecurityPublicSubnetCidrB: !Ref SecurityPublicSubnetCidrB
+        SecurityPrivateSubnetCidr: !Ref SecurityPrivateSubnetCidr
+        FrontendVpcCidr: !Ref FrontendVpcCidr
+        FrontendSubnetCidr: !Ref FrontendSubnetCidr
+        BackendVpcCidr: !Ref BackendVpcCidr
+        BackendSubnetCidr: !Ref BackendSubnetCidr
+
+  DynamoDBStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: ./02-dynamodb.yaml
+      Parameters:
+        TableName: !Ref TableName
+
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: DynamoDBStack
+    Properties:
+      TemplateURL: ./03-compute.yaml
+      Parameters:
+        InstanceType: !Ref InstanceType
+        AmazonLinuxAmi: !Ref AmazonLinuxAmi
+        DynamoDBTableName: !Ref TableName
+        InstancePassword: !Ref InstancePassword
+
+  LoadBalancerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ComputeStack
+    Properties:
+      TemplateURL: ./04-loadbalancer.yaml
+
+Outputs:
+  ApplicationLoadBalancerDnsName:
+    Description: DNS name of the application load balancer
+    Value: !GetAtt LoadBalancerStack.Outputs.ApplicationLoadBalancerDnsName
+  ApplicationLoadBalancerUrl:
+    Description: URL of the application
+    Value: !Sub http://${LoadBalancerStack.Outputs.ApplicationLoadBalancerDnsName}
+  FrontendInstanceId:
+    Value: !GetAtt ComputeStack.Outputs.FrontendInstanceId
