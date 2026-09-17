@@ -20,7 +20,7 @@ Parameters:
   InstancePassword:
     Type: String
     NoEcho: true
-    Default: 'True123!'
+    Default: '1234'
     Description: Password for the ec2-user account
 
 Resources:
@@ -36,6 +36,8 @@ Resources:
                 - ec2.amazonaws.com
             Action:
               - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: FrontendDynamoDBAccess
           PolicyDocument:
