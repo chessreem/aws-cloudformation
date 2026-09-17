@@ -37,7 +37,7 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
   InstancePassword:
     Type: String
-    Default: 'True123!'
+    Default: '1234'
     NoEcho: true
 
 Resources:

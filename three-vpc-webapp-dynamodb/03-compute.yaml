@@ -20,7 +20,7 @@ Parameters:
   InstancePassword:
     Type: String
     NoEcho: true
-    Default: 'True123!'
+    Default: '1234'
     Description: Password for the ec2-user account
 
 Resources:
@@ -36,6 +36,8 @@ Resources:
                 - ec2.amazonaws.com
             Action:
               - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: FrontendDynamoDBAccess
           PolicyDocument:
@@ -59,6 +61,7 @@ Resources:
 
   FrontendInstance:
     Type: AWS::EC2::Instance
+    DependsOn: FrontendInstanceProfile
     Properties:
       ImageId: !Ref AmazonLinuxAmi
       InstanceType: !Ref InstanceType
@@ -76,38 +79,69 @@ Resources:
       MetadataOptions:
         HttpTokens: required
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -xe
-          dnf update -y
-          dnf install -y nginx awscli
-          echo "ec2-user:${InstancePassword}" | chpasswd
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash -xe
+            dnf update -y
+            dnf install -y nginx awscli cronie
+            echo "ec2-user:${PASS}" | chpasswd
 
-          export AWS_DEFAULT_REGION="${AWS::Region}"
-          TABLE_NAME="${DynamoDBTableName}"
-          PAGE_ID="homepage"
-          HTML_FILE="/usr/share/nginx/html/index.html"
+            # Ensure Nginx directory exists with proper permissions
+            mkdir -p /usr/share/nginx/html
+            chmod 755 /usr/share/nginx/html
+            systemctl enable --now nginx
 
-          systemctl enable nginx
-          systemctl start nginx
+            # Write update script with hardcoded table name and region
+            cat << 'EOF' > /usr/local/bin/update-homepage.sh
+            #!/bin/bash
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            export AWS_DEFAULT_REGION="eu-central-1"
+            
+            TABLE_NAME="BackendAppData"
+            PAGE_ID="homepage"
+            HTML_FILE="/usr/share/nginx/html/index.html"
 
-          # 2. Fetch item from DynamoDB (returns "None" if key is missing)
-          HTML_VALUE=$(aws dynamodb get-item \
-            --table-name "$TABLE_NAME" \
-            --key '{"id":{"S":"'"$PAGE_ID"'"}}' \
-            --query 'Item.html.S' \
-            --output text 2>/dev/null || echo "None")
-
-          # 3. Check for BOTH empty string AND the string "None"
-          if [ -z "$HTML_VALUE" ] || [ "$HTML_VALUE" = "None" ]; then
-            HTML_VALUE='<h1>Frontend EC2 instance is running</h1><p>Content pulled from DynamoDB</p>'
-            aws dynamodb put-item \
+            # Fetch item from DynamoDB in eu-central-1
+            HTML_VALUE=$(aws dynamodb get-item \
+              --region eu-central-1 \
               --table-name "$TABLE_NAME" \
-              --item '{"id":{"S":"'"$PAGE_ID"'"},"html":{"S":"'"$HTML_VALUE"'"}}'
-          fi
+              --key '{"id":{"S":"'"$PAGE_ID"'"}}' \
+              --query 'Item.html.S' \
+              --output text 2>/dev/null || echo "None")
 
-          printf '%s' "$HTML_VALUE" > "$HTML_FILE"
-          chown nginx:nginx "$HTML_FILE"
-          systemctl reload nginx
+            # Fallback if key missing or empty
+            if [ -z "$HTML_VALUE" ] || [ "$HTML_VALUE" = "None" ]; then
+              HTML_VALUE='<h1>Frontend EC2 instance is running</h1><p>Content pulled from DynamoDB is empty</p>'
+              aws dynamodb put-item \
+                --region eu-central-1 \
+                --table-name "$TABLE_NAME" \
+                --item '{"id":{"S":"'"$PAGE_ID"'"},"html":{"S":"'"$HTML_VALUE"'"}}'
+            fi
+
+            # Update index.html and set permissions
+            printf '%s' "$HTML_VALUE" > "$HTML_FILE"
+            chmod 644 "$HTML_FILE"
+            chown nginx:nginx "$HTML_FILE"
+            systemctl reload nginx
+            EOF
+
+            chmod 755 /usr/local/bin/update-homepage.sh
+
+            # Initial execution on boot
+            /usr/local/bin/update-homepage.sh
+
+            # Cron job setup
+            cat << 'CRON' > /etc/cron.d/update-homepage
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            AWS_DEFAULT_REGION=eu-central-1
+            * * * * * root /usr/local/bin/update-homepage.sh > /dev/null 2>&1
+            CRON
+
+            chmod 0644 /etc/cron.d/update-homepage
+            chown root:root /etc/cron.d/update-homepage
+            systemctl enable --now crond
+          - PASS: !Ref InstancePassword
+
       Tags:
         - Key: Name
           Value: Frontend-App-Server
