@@ -1,1 +1,1 @@
-template-file-path: nested-stack.yaml
+template-file-path: three-vpc-webapp-dynamodb/nested-stack.yaml
