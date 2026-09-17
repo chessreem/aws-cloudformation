@@ -44,7 +44,7 @@ Resources:
   NetworkStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: ./01-network.yaml
+      TemplateURL: three-vpc-webapp-dynamodb/01-network.yaml
       Parameters:
         SecurityVpcCidr: !Ref SecurityVpcCidr
         SecurityPublicSubnetCidr: !Ref SecurityPublicSubnetCidr
@@ -59,7 +59,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn: NetworkStack
     Properties:
-      TemplateURL: ./02-dynamodb.yaml
+      TemplateURL: three-vpc-webapp-dynamodb/02-dynamodb.yaml
       Parameters:
         TableName: !Ref TableName
 
@@ -67,7 +67,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn: DynamoDBStack
     Properties:
-      TemplateURL: ./03-compute.yaml
+      TemplateURL: three-vpc-webapp-dynamodb/03-compute.yaml
       Parameters:
         InstanceType: !Ref InstanceType
         AmazonLinuxAmi: !Ref AmazonLinuxAmi
@@ -78,7 +78,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn: ComputeStack
     Properties:
-      TemplateURL: ./04-loadbalancer.yaml
+      TemplateURL: three-vpc-webapp-dynamodb/04-loadbalancer.yaml
 
 Outputs:
   ApplicationLoadBalancerDnsName:
