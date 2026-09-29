@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: One VPC with two public ALB subnets and separate private frontend and backend subnets
+Description: One VPC with two public ALB subnets, two private frontend subnets, and a private backend subnet
 
 Parameters:
   MainVpcCidr:
@@ -21,6 +21,11 @@ Parameters:
     Type: String
     Default: 10.20.2.0/24
     Description: Private subnet for the frontend application instance
+
+  FrontendSubnetCidrB:
+    Type: String
+    Default: 10.20.4.0/24
+    Description: Second private frontend subnet in another Availability Zone
 
   BackendSubnetCidr:
     Type: String
@@ -84,6 +89,17 @@ Resources:
         - Key: Name
           Value: Private-App-Subnet
 
+  FrontendSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: !Ref FrontendSubnetCidrB
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private-App-Subnet-B
+
   BackendSubnet:
     Type: AWS::EC2::Subnet
     Properties:
@@ -137,6 +153,12 @@ Resources:
       SubnetId: !Ref FrontendSubnet
       RouteTableId: !Ref FrontendRouteTable
 
+  FrontendSubnetBAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref FrontendSubnetB
+      RouteTableId: !Ref FrontendRouteTable
+
   BackendRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -151,6 +173,115 @@ Resources:
       SubnetId: !Ref BackendSubnet
       RouteTableId: !Ref BackendRouteTable
 
+
+  PrivateServiceEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow private workloads to reach AWS service endpoints over HTTPS
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref FrontendSubnetCidr
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref FrontendSubnetCidrB
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref BackendSubnetCidr
+      Tags:
+        - Key: Name
+          Value: Private-Service-Endpoints-SG
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SecurityVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref FrontendSubnet
+        - !Ref FrontendSubnetB
+      SecurityGroupIds:
+        - !Ref PrivateServiceEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: ECR-API-Endpoint
+
+  EcrDockerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SecurityVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref FrontendSubnet
+        - !Ref FrontendSubnetB
+      SecurityGroupIds:
+        - !Ref PrivateServiceEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: ECR-Docker-Endpoint
+
+  EksApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SecurityVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.eks
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref FrontendSubnet
+        - !Ref FrontendSubnetB
+      SecurityGroupIds:
+        - !Ref PrivateServiceEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: EKS-API-Endpoint
+
+  StsApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SecurityVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sts
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref FrontendSubnet
+        - !Ref FrontendSubnetB
+      SecurityGroupIds:
+        - !Ref PrivateServiceEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: STS-API-Endpoint
+
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SecurityVPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref FrontendSubnet
+        - !Ref FrontendSubnetB
+      SecurityGroupIds:
+        - !Ref PrivateServiceEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CloudWatch-Logs-Endpoint
+
+  NginxPublicEcrCache:
+    Type: AWS::ECR::PullThroughCacheRule
+    Properties:
+      EcrRepositoryPrefix: public-ecr
+      UpstreamRegistryUrl: public.ecr.aws
+
   FrontendS3Endpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -159,6 +290,7 @@ Resources:
       VpcEndpointType: Gateway
       RouteTableIds:
         - !Ref FrontendRouteTable
+        - !Ref BackendRouteTable
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -235,9 +367,17 @@ Resources:
           ToPort: 8080
           CidrIp: !Ref FrontendSubnetCidr
         - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref FrontendSubnetCidrB
+        - IpProtocol: tcp
           FromPort: 3306
           ToPort: 3306
           CidrIp: !Ref FrontendSubnetCidr
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref FrontendSubnetCidrB
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
@@ -282,6 +422,11 @@ Outputs:
     Export:
       Name: Dev-FrontendSubnetId
 
+  FrontendSubnetIdB:
+    Value: !Ref FrontendSubnetB
+    Export:
+      Name: Dev-FrontendSubnetIdB
+
   FrontendRouteTableId:
     Value: !Ref FrontendRouteTable
     Export:
@@ -306,3 +451,9 @@ Outputs:
     Value: !Ref BackendSecurityGroup
     Export:
       Name: Dev-BackendSecurityGroupId
+
+  NginxImageUri:
+    Description: Private ECR pull-through cache URI for the NGINX container image
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/public-ecr/nginx/nginx:1.27-alpine
+    Export:
+      Name: Dev-NginxImageUri
