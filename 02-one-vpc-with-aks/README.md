@@ -1,16 +1,14 @@
-# three-vpc-webapp-dynamodb
+# one-vpc-webapp-dynamodb
 
-A three-VPC AWS web application infrastructure project defined with CloudFormation.
+A single-VPC AWS web application infrastructure project defined with CloudFormation.
 
 ## Overview
 
-This project creates a separated AWS network for a small web application:
+This project creates a small web application network with one VPC and four subnets:
 
-- **Security VPC** contains an internet-facing Application Load Balancer.
-- **Frontend VPC** contains an EC2 instance running NGINX.
-- **Backend VPC** provides the DynamoDB-backed application data layer.
-- An AWS Transit Gateway connects the VPCs and their route tables.
-- A DynamoDB VPC endpoint allows the frontend instance to access DynamoDB privately.
+- Two public subnets in separate Availability Zones host the internet-facing Application Load Balancer.
+- A private frontend subnet hosts the EC2 instance running NGINX.
+- A separate private backend subnet is reserved for backend workloads. DynamoDB is an AWS-managed regional service, not a resource deployed inside a subnet; its VPC endpoint is associated with both private route tables.
 
 The EC2 UserData script installs NGINX and uses the instance IAM role to retrieve application content from DynamoDB. If the expected item does not exist, the bootstrap process creates a default item.
 
@@ -18,7 +16,7 @@ The EC2 UserData script installs NGINX and uses the instance IAM role to retriev
 
 | Template | Purpose |
 | --- | --- |
-| `01-network.yaml` | VPCs, subnets, route tables, Transit Gateway, security groups, routes, and the DynamoDB endpoint |
+| `01-network.yaml` | VPC, four subnets, route tables, security groups, and S3/DynamoDB endpoints |
 | `02-dynamodb.yaml` | DynamoDB table and exported table values |
 | `03-compute.yaml` | EC2 frontend instance, IAM role, and NGINX bootstrap configuration |
 | `04-loadbalancer.yaml` | Application Load Balancer, target group, and listener |
@@ -39,7 +37,7 @@ The templates use CloudFormation exports and imports, so deploy them in the list
 The parent template can be packaged and deployed as one stack. CloudFormation uploads the four child templates to S3 during packaging.
 So using the nested-stack.yaml:
 ```powershell
-cd aws-cloudformation/three-vpc-webapp-dynamodb
+cd aws-cloudformation/02-one-vpc-with-aks
 aws cloudformation package `
 	--template-file nested-stack.yaml `
 	--s3-bucket YOUR_ARTIFACT_BUCKET `
@@ -47,7 +45,7 @@ aws cloudformation package `
 
 aws cloudformation deploy `
 	--template-file packaged-nested-stack.yaml `
-	--stack-name three-vpc-webapp-dynamodb `
+	--stack-name one-vpc-webapp-dynamodb `
 	--capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM `
 	--parameter-overrides InstancePassword='REPLACE_WITH_A_STRONG_PASSWORD'
 ```

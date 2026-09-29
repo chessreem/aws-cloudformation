@@ -8,7 +8,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allow inbound HTTP/HTTPS to the ALB and outbound to the frontend instance
-      VpcId: !ImportValue Dev-SecurityVpcId
+      VpcId: !ImportValue Dev-MainVpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -30,7 +30,7 @@ Resources:
     Properties:
       Name: FrontendTargetGroup
       TargetType: ip
-      VpcId: !ImportValue Dev-SecurityVpcId
+      VpcId: !ImportValue Dev-MainVpcId
       Protocol: HTTP
       Port: 80
       HealthCheckEnabled: true
@@ -69,8 +69,8 @@ Resources:
       SecurityGroups:
         - !Ref AlbSecurityGroup
       Subnets:
-        - !ImportValue Dev-SecurityPublicSubnetId
-        - !ImportValue Dev-SecurityPublicSubnetIdB
+        - !ImportValue Dev-MainPublicSubnetId
+        - !ImportValue Dev-MainPublicSubnetIdB
       Tags:
         - Key: Name
           Value: Security-Frontend-ALB

@@ -1,31 +1,22 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Deploy the complete three-VPC web application as nested CloudFormation stacks
+Description: Deploy the single-VPC four-subnet web application as nested CloudFormation stacks
 
 Parameters:
-  SecurityVpcCidr:
+  MainVpcCidr:
     Type: String
-    Default: 10.20.0.0/24
+    Default: 10.20.0.0/16
   SecurityPublicSubnetCidr:
     Type: String
-    Default: 10.20.0.0/26
+    Default: 10.20.0.0/24
   SecurityPublicSubnetCidrB:
     Type: String
-    Default: 10.20.0.128/26
-  SecurityPrivateSubnetCidr:
-    Type: String
-    Default: 10.20.0.64/26
-  FrontendVpcCidr:
-    Type: String
-    Default: 10.21.0.0/24
+    Default: 10.20.1.0/24
   FrontendSubnetCidr:
     Type: String
-    Default: 10.21.0.0/24
-  BackendVpcCidr:
-    Type: String
-    Default: 10.22.0.0/24
+    Default: 10.20.2.0/24
   BackendSubnetCidr:
     Type: String
-    Default: 10.22.0.0/24
+    Default: 10.20.3.0/24
   TableName:
     Type: String
     Default: BackendAppData
@@ -44,22 +35,19 @@ Resources:
   NetworkStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: ./three-vpc-webapp-dynamodb/01-network.yaml
+      TemplateURL: ./01-network.yaml
       Parameters:
-        SecurityVpcCidr: !Ref SecurityVpcCidr
+        MainVpcCidr: !Ref MainVpcCidr
         SecurityPublicSubnetCidr: !Ref SecurityPublicSubnetCidr
         SecurityPublicSubnetCidrB: !Ref SecurityPublicSubnetCidrB
-        SecurityPrivateSubnetCidr: !Ref SecurityPrivateSubnetCidr
-        FrontendVpcCidr: !Ref FrontendVpcCidr
         FrontendSubnetCidr: !Ref FrontendSubnetCidr
-        BackendVpcCidr: !Ref BackendVpcCidr
         BackendSubnetCidr: !Ref BackendSubnetCidr
 
   DynamoDBStack:
     Type: AWS::CloudFormation::Stack
     DependsOn: NetworkStack
     Properties:
-      TemplateURL: ./three-vpc-webapp-dynamodb/02-dynamodb.yaml
+      TemplateURL: ./02-dynamodb.yaml
       Parameters:
         TableName: !Ref TableName
 
@@ -67,7 +55,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn: DynamoDBStack
     Properties:
-      TemplateURL: ./three-vpc-webapp-dynamodb/03-compute.yaml
+      TemplateURL: ./03-compute.yaml
       Parameters:
         InstanceType: !Ref InstanceType
         AmazonLinuxAmi: !Ref AmazonLinuxAmi
@@ -78,7 +66,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     DependsOn: ComputeStack
     Properties:
-      TemplateURL: ./three-vpc-webapp-dynamodb/04-loadbalancer.yaml
+      TemplateURL: ./04-loadbalancer.yaml
 
 Outputs:
   ApplicationLoadBalancerDnsName:
