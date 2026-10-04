@@ -423,12 +423,6 @@ Resources:
         - Key: Name
           Value: Frontend-CloudWatch-Logs-Endpoint
 
-  FrontendNginxEcrCache:
-    Type: AWS::ECR::PullThroughCacheRule
-    Properties:
-      EcrRepositoryPrefix: public-ecr
-      UpstreamRegistryUrl: public.ecr.aws
-
   FrontendToSecurityRoute:
     Type: AWS::EC2::Route
     DependsOn:

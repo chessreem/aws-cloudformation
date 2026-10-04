@@ -59,6 +59,21 @@ Resources:
         - Key: Name
           Value: !Sub ${ClusterName}-cluster-role
 
+
+  FrontendNginxEcrCache:
+    Type: AWS::ECR::PullThroughCacheRule
+    Properties:
+      EcrRepositoryPrefix: public-ecr
+      UpstreamRegistryUrl: public.ecr.aws
+      
+  NginxEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: public-ecr/nginx/nginx
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: false
+
   EksNodeRole:
     Type: AWS::IAM::Role
     Properties:
@@ -79,7 +94,8 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ecr:BatchImportUpstreamImage
+                Action:
+                - ecr:BatchImportUpstreamImage
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/public-ecr/nginx/nginx
       Tags:
         - Key: Name
@@ -392,6 +408,7 @@ Resources:
       - NginxNodegroup
       - NginxManifestAccessEntry
       - NginxManifestClusterIngress
+      - NginxEcrRepository
     Properties:
       ServiceToken: !GetAtt NginxManifestProvider.Arn
       ClusterName: !Ref NginxCluster
