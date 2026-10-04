@@ -218,6 +218,7 @@ Resources:
     Properties:
       SubnetIds:
         - !Ref SecurityPrivateSubnet
+        - !Ref SecurityPublicSubnetB
       TransitGatewayId: !Ref TransitGateway
       VpcId: !Ref SecurityVPC
       Tags:
@@ -704,6 +705,12 @@ Outputs:
     Value: !Ref SecurityVPC
     Export:
       Name: Dev-SecurityVpcId
+
+  SecurityVpcCidr:
+    Description: CIDR block of the Security VPC
+    Value: !Ref SecurityVpcCidr
+    Export:
+      Name: Dev-SecurityVpcCidr
 
   FrontendVpcId:
     Value: !Ref FrontendVPC

@@ -114,10 +114,7 @@ Resources:
     Properties:
       TemplateURL: ./04-loadbalancer.yaml
       Parameters:
-        SecurityVpcCidr: !Ref SecurityVpcCidr
-        EksClusterSecurityGroupId: !GetAtt ComputeStack.Outputs.EksClusterSecurityGroupId
-        EksClusterName: !GetAtt ComputeStack.Outputs.EksClusterName
-        EksNodegroupName: !GetAtt ComputeStack.Outputs.EksNodegroupName
+        SecurityVpcCidr: !GetAtt NetworkStack.Outputs.SecurityVpcCidr
 
 Outputs:
   ApplicationLoadBalancerDnsName:

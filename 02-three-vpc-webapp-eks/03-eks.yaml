@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Amazon EKS cluster running the NGINX microservice in private subnets
+Description: Private Amazon EKS cluster running the NGINX microservice in the Frontend VPC
 
 Parameters:
   ClusterName:
@@ -37,26 +37,10 @@ Parameters:
     Default: 2
     Description: Number of NGINX application pods
 
-  ClusterPublicAccessCidrs:
-    Type: CommaDelimitedList
-    Default: 0.0.0.0/0
-    Description: CIDR ranges allowed to reach the public Kubernetes API endpoint; restrict this for production
-
-  FrontendSubnetId:
+  DynamoDBTableName:
     Type: String
-    Description: ID of the private frontend subnet
-
-  FrontendSubnetIdB:
-    Type: String
-    Description: ID of the second private frontend subnet in another Availability Zone
-
-  FrontendSecurityGroupId:
-    Type: String
-    Description: Existing frontend security group with outbound access
-
-  NginxImageUri:
-    Type: String
-    Description: Private ECR pull-through cache URI for the NGINX image
+    Default: BackendAppData
+    Description: DynamoDB table containing the frontend HTML content
 
 Resources:
   EksClusterRole:
@@ -74,6 +58,21 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ClusterName}-cluster-role
+
+
+  FrontendNginxEcrCache:
+    Type: AWS::ECR::PullThroughCacheRule
+    Properties:
+      EcrRepositoryPrefix: public-ecr
+      UpstreamRegistryUrl: public.ecr.aws
+
+  NginxEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: public-ecr/nginx/nginx
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: false
 
   EksNodeRole:
     Type: AWS::IAM::Role
@@ -95,7 +94,8 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ecr:BatchImportUpstreamImage
+                Action:
+                - ecr:BatchImportUpstreamImage
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/public-ecr/nginx/nginx
       Tags:
         - Key: Name
@@ -112,11 +112,10 @@ Resources:
         BootstrapClusterCreatorAdminPermissions: true
       ResourcesVpcConfig:
         SubnetIds:
-          - !Ref FrontendSubnetId
-          - !Ref FrontendSubnetIdB
+          - !ImportValue Dev-FrontendSubnetId
+          - !ImportValue Dev-FrontendSubnetIdB
         EndpointPrivateAccess: true
-        EndpointPublicAccess: true
-        PublicAccessCidrs: !Ref ClusterPublicAccessCidrs
+        EndpointPublicAccess: false
       Tags:
         - Key: Name
           Value: !Ref ClusterName
@@ -128,8 +127,8 @@ Resources:
       NodegroupName: !Sub ${ClusterName}-workers
       NodeRole: !GetAtt EksNodeRole.Arn
       Subnets:
-        - !Ref FrontendSubnetId
-        - !Ref FrontendSubnetIdB
+        - !ImportValue Dev-FrontendSubnetId
+        - !ImportValue Dev-FrontendSubnetIdB
       AmiType: AL2023_x86_64_STANDARD
       CapacityType: ON_DEMAND
       DiskSize: 20
@@ -156,13 +155,18 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
       Policies:
-        - PolicyName: DescribeEksCluster
+        - PolicyName: ManageNginxAndReadHomepage
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action: eks:DescribeCluster
                 Resource: !Sub arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !ImportValue Dev-BackendDynamoDBTableArn
       Tags:
         - Key: Name
           Value: !Sub ${ClusterName}-manifest-role
@@ -174,8 +178,8 @@ Resources:
       IpProtocol: tcp
       FromPort: 443
       ToPort: 443
-      SourceSecurityGroupId: !Ref FrontendSecurityGroupId
-      Description: Allow the manifest provider to access the EKS Kubernetes API
+      SourceSecurityGroupId: !ImportValue Dev-FrontendSecurityGroupId
+      Description: Allow the manifest provider to access the private EKS API
 
   NginxManifestProvider:
     Type: AWS::Lambda::Function
@@ -187,24 +191,23 @@ Resources:
       MemorySize: 256
       VpcConfig:
         SubnetIds:
-          - !Ref FrontendSubnetId
-          - !Ref FrontendSubnetIdB
+          - !ImportValue Dev-FrontendSubnetId
+          - !ImportValue Dev-FrontendSubnetIdB
         SecurityGroupIds:
-          - !Ref FrontendSecurityGroupId
+          - !ImportValue Dev-FrontendSecurityGroupId
       Code:
         ZipFile: |
           import base64
           import json
           import time
           import urllib.error
-          import urllib.parse
           import urllib.request
           import boto3
           import botocore.session
           from botocore.auth import SigV4QueryAuth
           from botocore.awsrequest import AWSRequest
 
-          def response(event, context, success, data=None, reason=None):
+          def send_response(event, context, success, reason=None):
               body = {
                   "Status": "SUCCESS" if success else "FAILED",
                   "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
@@ -213,19 +216,18 @@ Resources:
                   "RequestId": event["RequestId"],
                   "LogicalResourceId": event["LogicalResourceId"],
                   "NoEcho": False,
-                  "Data": data or {}
+                  "Data": {"ServiceName": "nginx", "NodePort": "30080"} if success else {}
               }
+              payload = json.dumps(body).encode()
               request = urllib.request.Request(
-                  event["ResponseURL"],
-                  data=json.dumps(body).encode(),
-                  headers={"content-type": "", "content-length": str(len(json.dumps(body).encode()))},
+                  event["ResponseURL"], data=payload,
+                  headers={"content-type": "", "content-length": str(len(payload))},
                   method="PUT"
               )
               urllib.request.urlopen(request, timeout=30).read()
 
           def eks_token(cluster_name, region):
-              session = botocore.session.get_session()
-              credentials = session.get_credentials().get_frozen_credentials()
+              credentials = botocore.session.get_session().get_credentials().get_frozen_credentials()
               request = AWSRequest(
                   method="GET",
                   url=f"https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
@@ -236,64 +238,105 @@ Resources:
               return "k8s-aws-v1." + encoded
 
           def api_request(endpoint, ca_data, token, path, method, body=None):
-              url = endpoint + path
               payload = None if body is None else json.dumps(body).encode()
-              headers = {
-                  "Authorization": "Bearer " + token,
-                  "Accept": "application/json"
-              }
+              headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
               if payload is not None:
                   headers["Content-Type"] = "application/apply-patch+yaml"
-              request = urllib.request.Request(url, data=payload, headers=headers, method=method)
-              context = __import__("ssl").create_default_context(
-                  cadata=base64.b64decode(ca_data).decode()
-              )
+              request = urllib.request.Request(endpoint + path, data=payload, headers=headers, method=method)
+              context = __import__("ssl").create_default_context(cadata=base64.b64decode(ca_data).decode())
               try:
                   with urllib.request.urlopen(request, context=context, timeout=30) as result:
                       return json.loads(result.read() or b"{}")
               except urllib.error.HTTPError as error:
                   detail = error.read().decode()
-                  if error.code == 404 and method == "DELETE":
+                  if error.code == 404 and method in ("DELETE", "GET"):
                       return {}
                   raise RuntimeError(f"Kubernetes API {method} {path} failed ({error.code}): {detail}")
 
+          def sync_homepage(endpoint, ca_data, token, table_name):
+              dynamodb = boto3.client("dynamodb")
+              item = dynamodb.get_item(
+                  TableName=table_name,
+                  Key={"id": {"S": "homepage"}},
+                  ConsistentRead=True
+              ).get("Item", {})
+              html = item.get("html", {}).get("S")
+              if not html:
+                  html = "<h1>NGINX is running on Amazon EKS</h1><p>Homepage content was empty in DynamoDB.</p>"
+                  dynamodb.put_item(
+                      TableName=table_name,
+                      Item={"id": {"S": "homepage"}, "html": {"S": html}}
+                  )
+
+              path = "/api/v1/namespaces/default/configmaps/nginx-homepage"
+              current = api_request(endpoint, ca_data, token, path, "GET")
+              if current.get("data", {}).get("index.html") != html:
+                  config_map = {
+                      "apiVersion": "v1",
+                      "kind": "ConfigMap",
+                      "metadata": {"name": "nginx-homepage", "namespace": "default"},
+                      "data": {"index.html": html}
+                  }
+                  api_request(endpoint, ca_data, token, path + "?fieldManager=cloudformation&force=true", "PATCH", config_map)
+
           def handler(event, context):
-              props = event["ResourceProperties"]
+              props = event.get("ResourceProperties", event)
               cluster_name = props["ClusterName"]
-              desired = int(props["Replicas"])
               region = boto3.session.Session().region_name
               eks = boto3.client("eks", region_name=region)
               try:
                   cluster = eks.describe_cluster(name=cluster_name)["cluster"]
-                  token = eks_token(cluster_name, region)
                   endpoint = cluster["endpoint"]
                   ca_data = cluster["certificateAuthority"]["data"]
+                  token = eks_token(cluster_name, region)
+
+                  if "RequestType" not in event:
+                      sync_homepage(endpoint, ca_data, token, event["TableName"])
+                      return
+
                   deployment_path = "/apis/apps/v1/namespaces/default/deployments/nginx"
                   service_path = "/api/v1/namespaces/default/services/nginx"
+
                   if event["RequestType"] == "Delete":
                       api_request(endpoint, ca_data, token, service_path, "DELETE")
                       api_request(endpoint, ca_data, token, deployment_path, "DELETE")
-                      response(event, context, True)
+                      send_response(event, context, True)
                       return
 
+                  replicas = int(props["Replicas"])
+                  sync_homepage(endpoint, ca_data, token, props["TableName"])
                   deployment = {
                       "apiVersion": "apps/v1",
                       "kind": "Deployment",
                       "metadata": {"name": "nginx", "namespace": "default", "labels": {"app": "nginx"}},
                       "spec": {
-                          "replicas": desired,
+                          "replicas": replicas,
                           "selector": {"matchLabels": {"app": "nginx"}},
                           "template": {
                               "metadata": {"labels": {"app": "nginx"}},
-                              "spec": {"containers": [{
-                                  "name": "nginx",
-                                  "image": props["ImageUri"],
-                                  "ports": [{"name": "http", "containerPort": 80}],
-                                  "resources": {
+                                "spec": {
+                                  "containers": [{
+                                    "name": "nginx",
+                                    "image": props["ImageUri"],
+                                    "ports": [{"name": "http", "containerPort": 80}],
+                                    "resources": {
                                       "requests": {"cpu": "100m", "memory": "128Mi"},
                                       "limits": {"cpu": "500m", "memory": "256Mi"}
-                                  }
-                              }]}
+                                    },
+                                    "volumeMounts": [{
+                                      "name": "homepage",
+                                        "mountPath": "/usr/share/nginx/html",
+                                      "readOnly": True
+                                    }]
+                                  }],
+                                  "volumes": [{
+                                    "name": "homepage",
+                                    "configMap": {
+                                      "name": "nginx-homepage",
+                                      "items": [{"key": "index.html", "path": "index.html"}]
+                                    }
+                                  }]
+                                }
                           }
                       }
                   }
@@ -315,14 +358,35 @@ Resources:
                   while time.time() < deadline:
                       token = eks_token(cluster_name, region)
                       state = api_request(endpoint, ca_data, token, deployment_path, "GET")
-                      available = state.get("status", {}).get("availableReplicas", 0)
-                      if available >= desired:
-                          response(event, context, True, {"ServiceName": "nginx", "NodePort": "30080"})
+                      if state.get("status", {}).get("availableReplicas", 0) >= replicas:
+                          send_response(event, context, True)
                           return
                       time.sleep(10)
                   raise RuntimeError("Timed out waiting for NGINX replicas to become available")
               except Exception as error:
-                  response(event, context, False, reason=str(error))
+                  if "RequestType" in event:
+                      send_response(event, context, False, str(error))
+                  else:
+                      raise
+
+  NginxHomepageSyncSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Keep the NGINX homepage synchronized with DynamoDB
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt NginxManifestProvider.Arn
+          Id: SyncNginxHomepage
+          Input: !Sub '{"ClusterName":"${ClusterName}","TableName":"${DynamoDBTableName}"}'
+
+  NginxHomepageSyncPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NginxManifestProvider
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NginxHomepageSyncSchedule.Arn
 
   NginxManifestAccessEntry:
     Type: AWS::EKS::AccessEntry
@@ -344,11 +408,13 @@ Resources:
       - NginxNodegroup
       - NginxManifestAccessEntry
       - NginxManifestClusterIngress
+      - NginxEcrRepository
     Properties:
       ServiceToken: !GetAtt NginxManifestProvider.Arn
       ClusterName: !Ref NginxCluster
       Replicas: !Ref NginxReplicas
-      ImageUri: !Ref NginxImageUri
+      TableName: !Ref DynamoDBTableName
+      ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/public-ecr/nginx/nginx:1.27-alpine
 
 Outputs:
   EksClusterName:
@@ -358,7 +424,7 @@ Outputs:
       Name: Dev-EksClusterName
 
   EksClusterEndpoint:
-    Description: Kubernetes API endpoint
+    Description: Private Kubernetes API endpoint
     Value: !GetAtt NginxCluster.Endpoint
 
   EksClusterSecurityGroupId:
@@ -369,7 +435,7 @@ Outputs:
 
   EksNodegroupName:
     Description: Managed node group name
-    Value: !Ref NginxNodegroup
+    Value: !GetAtt NginxNodegroup.NodegroupName
     Export:
       Name: Dev-EksNodegroupName
 

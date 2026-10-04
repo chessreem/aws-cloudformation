@@ -1,23 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Internet-facing ALB in the Security VPC forwarding traffic to the EKS NGINX service
 
-Parameters:
-  SecurityVpcCidr:
-    Type: String
-    Description: CIDR block of the VPC hosting the Application Load Balancer
-
-  EksClusterSecurityGroupId:
-    Type: String
-    Description: EKS cluster security group ID
-
-  EksClusterName:
-    Type: String
-    Description: Name of the EKS cluster
-
-  EksNodegroupName:
-    Type: String
-    Description: Name of the EKS managed node group
-
 Resources:
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -63,11 +46,11 @@ Resources:
   NginxNodePortIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      GroupId: !Ref EksClusterSecurityGroupId
+      GroupId: !ImportValue Dev-EksClusterSecurityGroupId
       IpProtocol: tcp
       FromPort: 30080
       ToPort: 30080
-      CidrIp: !Ref SecurityVpcCidr
+      CidrIp: !ImportValue Dev-SecurityVpcCidr
       Description: Allow the Security VPC ALB to reach the NGINX NodePort
 
   TargetRegistrationRole:
@@ -89,7 +72,11 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: eks:DescribeNodegroup
-                Resource: !Sub arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:nodegroup/${EksClusterName}/${EksNodegroupName}/*
+                Resource:
+                  Fn::Sub:
+                    - arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:nodegroup/${ClusterName}/*/*
+                    - ClusterName: !ImportValue Dev-EksClusterName
+                      NodegroupName: !ImportValue Dev-EksNodegroupName
               - Effect: Allow
                 Action:
                   - autoscaling:DescribeAutoScalingGroups
@@ -102,10 +89,10 @@ Resources:
                   - elasticloadbalancing:DescribeTargetHealth
                   - elasticloadbalancing:RegisterTargets
                   - elasticloadbalancing:DeregisterTargets
-                Resource: !Ref AlbTargetGroup
+                Resource: '*'
       Tags:
         - Key: Name
-          Value: !Sub ${EksClusterName}-target-registration-role
+          Value: !Sub ${AWS::StackName}-target-registration-role
 
   TargetRegistrationProvider:
     Type: AWS::Lambda::Function
@@ -249,8 +236,8 @@ Resources:
       - NginxNodePortIngress
     Properties:
       ServiceToken: !GetAtt TargetRegistrationProvider.Arn
-      ClusterName: !Ref EksClusterName
-      NodegroupName: !Ref EksNodegroupName
+      ClusterName: !ImportValue Dev-EksClusterName
+      NodegroupName: !ImportValue Dev-EksNodegroupName
       TargetGroupArn: !Ref AlbTargetGroup
 
   AlbListener:
