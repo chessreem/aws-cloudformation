@@ -93,7 +93,7 @@ Resources:
     Condition: DeployApplicationCondition
     DependsOn: DynamoDBStack
     Properties:
-      TemplateURL: ./03-compute.yaml
+      TemplateURL: ./03-eks.yaml
       Parameters:
         ClusterName: !Ref ClusterName
         KubernetesVersion: !Ref KubernetesVersion

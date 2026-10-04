@@ -18,7 +18,7 @@ A three-VPC AWS web application with NGINX running as a microservice on Amazon E
 | --- | --- |
 | `01-network.yaml` | Three VPCs, two frontend AZ subnets, Transit Gateway, private service endpoints, and ECR pull-through cache |
 | `02-dynamodb.yaml` | DynamoDB table and exported table values |
-| `03-compute.yaml` | Private EKS cluster, managed node group, NGINX Deployment/Service, and homepage synchronization |
+| `03-eks.yaml` | Private EKS cluster, managed node group, NGINX Deployment/Service, and homepage synchronization |
 | `04-loadbalancer.yaml` | Security VPC ALB and scheduled EKS node IP target reconciliation |
 | `nested-stack.yaml` | Parent stack that deploys the child templates |
 

@@ -42,18 +42,6 @@ Parameters:
     Default: BackendAppData
     Description: DynamoDB table containing the frontend HTML content
 
-  FrontendSubnetId:
-    Type: String
-    Description: ID of the first private frontend subnet
-
-  FrontendSubnetIdB:
-    Type: String
-    Description: ID of the second private frontend subnet in another Availability Zone
-
-  FrontendSecurityGroupId:
-    Type: String
-    Description: Security group used by the manifest provider Lambda
-
 Resources:
   EksClusterRole:
     Type: AWS::IAM::Role
@@ -108,8 +96,8 @@ Resources:
         BootstrapClusterCreatorAdminPermissions: true
       ResourcesVpcConfig:
         SubnetIds:
-          - !Ref FrontendSubnetId
-          - !Ref FrontendSubnetIdB
+          - !ImportValue FrontendSubnetId
+          - !ImportValue FrontendSubnetIdB
         EndpointPrivateAccess: true
         EndpointPublicAccess: false
       Tags:
@@ -123,8 +111,8 @@ Resources:
       NodegroupName: !Sub ${ClusterName}-workers
       NodeRole: !GetAtt EksNodeRole.Arn
       Subnets:
-        - !Ref FrontendSubnetId
-        - !Ref FrontendSubnetIdB
+        - !ImportValue Dev-FrontendSubnetId
+        - !ImportValue Dev-FrontendSubnetIdB
       AmiType: AL2023_x86_64_STANDARD
       CapacityType: ON_DEMAND
       DiskSize: 20
@@ -174,7 +162,7 @@ Resources:
       IpProtocol: tcp
       FromPort: 443
       ToPort: 443
-      SourceSecurityGroupId: !Ref FrontendSecurityGroupId
+      SourceSecurityGroupId: !ImportValue Dev-FrontendSecurityGroupId
       Description: Allow the manifest provider to access the private EKS API
 
   NginxManifestProvider:
@@ -187,10 +175,10 @@ Resources:
       MemorySize: 256
       VpcConfig:
         SubnetIds:
-          - !Ref FrontendSubnetId
-          - !Ref FrontendSubnetIdB
+          - !ImportValue FrontendSubnetId
+          - !ImportValue FrontendSubnetIdB
         SecurityGroupIds:
-          - !Ref FrontendSecurityGroupId
+          - !ImportValue FrontendSecurityGroupId
       Code:
         ZipFile: |
           import base64
