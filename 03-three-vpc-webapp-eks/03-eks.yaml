@@ -96,8 +96,8 @@ Resources:
         BootstrapClusterCreatorAdminPermissions: true
       ResourcesVpcConfig:
         SubnetIds:
-          - !ImportValue FrontendSubnetId
-          - !ImportValue FrontendSubnetIdB
+          - !ImportValue Dev-FrontendSubnetId
+          - !ImportValue Dev-FrontendSubnetIdB
         EndpointPrivateAccess: true
         EndpointPublicAccess: false
       Tags:
@@ -175,10 +175,10 @@ Resources:
       MemorySize: 256
       VpcConfig:
         SubnetIds:
-          - !ImportValue FrontendSubnetId
-          - !ImportValue FrontendSubnetIdB
+          - !ImportValue Dev-FrontendSubnetId
+          - !ImportValue Dev-FrontendSubnetIdB
         SecurityGroupIds:
-          - !ImportValue FrontendSecurityGroupId
+          - !ImportValue Dev-FrontendSecurityGroupId
       Code:
         ZipFile: |
           import base64
