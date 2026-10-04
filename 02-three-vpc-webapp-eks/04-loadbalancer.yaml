@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Internet-facing ALB in the Security VPC forwarding traffic to the EKS NGINX service
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow public HTTP/HTTPS to the ALB and outbound traffic to the EKS nodes
+      VpcId: !ImportValue Dev-SecurityVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ALB-SG
+
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: NginxEksTargetGroup
+      TargetType: ip
+      VpcId: !ImportValue Dev-SecurityVpcId
+      Protocol: HTTP
+      Port: 30080
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200-399'
+      Tags:
+        - Key: Name
+          Value: Nginx-EKS-TargetGroup
+
+  NginxNodePortIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue Dev-EksClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 30080
+      ToPort: 30080
+      CidrIp: !ImportValue Dev-SecurityVpcCidr
+      Description: Allow the Security VPC ALB to reach the NGINX NodePort
+
+  TargetRegistrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReconcileEksNodeTargets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: eks:DescribeNodegroup
+                Resource:
+                  Fn::Sub:
+                    - arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:nodegroup/${ClusterName}/*/*
+                    - ClusterName: !ImportValue Dev-EksClusterName
+                      NodegroupName: !ImportValue Dev-EksNodegroupName
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: '*'
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-target-registration-role
+
+  TargetRegistrationProvider:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt TargetRegistrationRole.Arn
+      Timeout: 120
+      Code:
+        ZipFile: |
+          import json
+          import urllib.request
+          import boto3
+
+          def send_response(event, context, status, reason=None):
+              body = {
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
+                  "PhysicalResourceId": event.get("PhysicalResourceId", event["LogicalResourceId"]),
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": False,
+                  "Data": {}
+              }
+              payload = json.dumps(body).encode()
+              request = urllib.request.Request(
+                  event["ResponseURL"], data=payload,
+                  headers={"content-type": "", "content-length": str(len(payload))},
+                  method="PUT"
+              )
+              urllib.request.urlopen(request, timeout=30).read()
+
+          def registered_targets(elbv2, target_group_arn):
+              health = elbv2.describe_target_health(TargetGroupArn=target_group_arn)
+              return [item["Target"] for item in health.get("TargetHealthDescriptions", [])]
+
+          def node_ips(eks, autoscaling, ec2, cluster_name, nodegroup_name):
+              nodegroup = eks.describe_nodegroup(
+                  clusterName=cluster_name,
+                  nodegroupName=nodegroup_name
+              )["nodegroup"]
+              group_names = [group["name"] for group in nodegroup["resources"]["autoScalingGroups"]]
+              groups = autoscaling.describe_auto_scaling_groups(
+                  AutoScalingGroupNames=group_names
+              )["AutoScalingGroups"]
+              instance_ids = [
+                  instance["InstanceId"]
+                  for group in groups
+                  for instance in group["Instances"]
+                  if instance["LifecycleState"] == "InService"
+              ]
+              if not instance_ids:
+                  return set()
+              reservations = ec2.describe_instances(InstanceIds=instance_ids)["Reservations"]
+              return {
+                  instance["PrivateIpAddress"]
+                  for reservation in reservations
+                  for instance in reservation["Instances"]
+                  if instance["State"]["Name"] == "running"
+              }
+
+          def reconcile(props):
+              eks = boto3.client("eks")
+              autoscaling = boto3.client("autoscaling")
+              ec2 = boto3.client("ec2")
+              elbv2 = boto3.client("elbv2")
+              target_group_arn = props["TargetGroupArn"]
+              desired = {
+                  (ip, 30080)
+                  for ip in node_ips(
+                      eks, autoscaling, ec2,
+                      props["ClusterName"], props["NodegroupName"]
+                  )
+              }
+              current = {
+                  (target["Id"], target.get("Port", 30080))
+                  for target in registered_targets(elbv2, target_group_arn)
+              }
+              stale = current - desired
+              missing = desired - current
+              if stale:
+                  elbv2.deregister_targets(
+                      TargetGroupArn=target_group_arn,
+                      Targets=[{"Id": ip, "Port": port} for ip, port in stale]
+                  )
+              if missing:
+                  elbv2.register_targets(
+                      TargetGroupArn=target_group_arn,
+                      Targets=[
+                          {"Id": ip, "Port": port, "AvailabilityZone": "all"}
+                          for ip, port in missing
+                      ]
+                  )
+
+          def handler(event, context):
+              props = event.get("ResourceProperties", {})
+              try:
+                  if event.get("RequestType") == "Delete":
+                      elbv2 = boto3.client("elbv2")
+                      targets = registered_targets(elbv2, props["TargetGroupArn"])
+                      if targets:
+                          elbv2.deregister_targets(
+                              TargetGroupArn=props["TargetGroupArn"],
+                              Targets=[
+                                  {"Id": target["Id"], "Port": target.get("Port", 30080)}
+                                  for target in targets
+                              ]
+                          )
+                  else:
+                      reconcile(props)
+                  if "RequestType" in event:
+                      send_response(event, context, "SUCCESS")
+              except Exception as error:
+                  if "RequestType" in event:
+                      send_response(event, context, "FAILED", str(error))
+                  else:
+                      raise
+
+  TargetRegistrationSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Keep ALB targets synchronized with EKS managed node replacements and scaling
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt TargetRegistrationProvider.Arn
+          Id: ReconcileEksNodeTargets
+
+  TargetRegistrationSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TargetRegistrationProvider
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TargetRegistrationSchedule.Arn
+
+  NginxNodegroupTargetRegistration:
+    Type: Custom::NginxNodegroupTargetRegistration
+    DependsOn:
+      - NginxNodePortIngress
+    Properties:
+      ServiceToken: !GetAtt TargetRegistrationProvider.Arn
+      ClusterName: !ImportValue Dev-EksClusterName
+      NodegroupName: !ImportValue Dev-EksNodegroupName
+      TargetGroupArn: !Ref AlbTargetGroup
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: SecurityFrontendAlb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !ImportValue Dev-SecurityPublicSubnetId
+        - !ImportValue Dev-SecurityPublicSubnetIdB
+      Tags:
+        - Key: Name
+          Value: Security-Frontend-ALB
+
+Outputs:
+  ApplicationLoadBalancerDnsName:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: Dev-ApplicationLoadBalancerDnsName
+
+  ApplicationLoadBalancerArn:
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: Dev-ApplicationLoadBalancerArn
+
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export:
+      Name: Dev-AlbSecurityGroupId

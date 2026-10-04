@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy the complete three-VPC web application as nested CloudFormation stacks
+
+Parameters:
+  SecurityVpcCidr:
+    Type: String
+    Default: 10.20.0.0/24
+  SecurityPublicSubnetCidr:
+    Type: String
+    Default: 10.20.0.0/26
+  SecurityPublicSubnetCidrB:
+    Type: String
+    Default: 10.20.0.128/26
+  SecurityPrivateSubnetCidr:
+    Type: String
+    Default: 10.20.0.64/26
+  FrontendVpcCidr:
+    Type: String
+    Default: 10.21.0.0/23
+  FrontendSubnetCidr:
+    Type: String
+    Default: 10.21.0.0/24
+  FrontendSubnetCidrB:
+    Type: String
+    Default: 10.21.1.0/24
+  BackendVpcCidr:
+    Type: String
+    Default: 10.22.0.0/24
+  BackendSubnetCidr:
+    Type: String
+    Default: 10.22.0.0/24
+  TableName:
+    Type: String
+    Default: BackendAppData
+  ClusterName:
+    Type: String
+    Default: nginx-microservice
+  KubernetesVersion:
+    Type: String
+    Default: '1.34'
+  NodeInstanceType:
+    Type: String
+    Default: t3.small
+  NodeDesiredSize:
+    Type: Number
+    Default: 2
+  NodeMinSize:
+    Type: Number
+    Default: 2
+  NodeMaxSize:
+    Type: Number
+    Default: 3
+  NginxReplicas:
+    Type: Number
+    Default: 2
+  DeployApplication:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'false'
+      - 'true'
+    Description: Enable EKS and the ALB after the private NGINX image cache is seeded
+
+Conditions:
+  DeployApplicationCondition: !Equals [!Ref DeployApplication, 'true']
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./01-network.yaml
+      Parameters:
+        SecurityVpcCidr: !Ref SecurityVpcCidr
+        SecurityPublicSubnetCidr: !Ref SecurityPublicSubnetCidr
+        SecurityPublicSubnetCidrB: !Ref SecurityPublicSubnetCidrB
+        SecurityPrivateSubnetCidr: !Ref SecurityPrivateSubnetCidr
+        FrontendVpcCidr: !Ref FrontendVpcCidr
+        FrontendSubnetCidr: !Ref FrontendSubnetCidr
+        FrontendSubnetCidrB: !Ref FrontendSubnetCidrB
+        BackendVpcCidr: !Ref BackendVpcCidr
+        BackendSubnetCidr: !Ref BackendSubnetCidr
+
+  DynamoDBStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: ./02-dynamodb.yaml
+      Parameters:
+        TableName: !Ref TableName
+
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployApplicationCondition
+    DependsOn: DynamoDBStack
+    Properties:
+      TemplateURL: ./03-eks.yaml
+      Parameters:
+        ClusterName: !Ref ClusterName
+        KubernetesVersion: !Ref KubernetesVersion
+        NodeInstanceType: !Ref NodeInstanceType
+        NodeDesiredSize: !Ref NodeDesiredSize
+        NodeMinSize: !Ref NodeMinSize
+        NodeMaxSize: !Ref NodeMaxSize
+        NginxReplicas: !Ref NginxReplicas
+        DynamoDBTableName: !Ref TableName
+        FrontendSubnetId: !GetAtt NetworkStack.Outputs.FrontendSubnetId
+        FrontendSubnetIdB: !GetAtt NetworkStack.Outputs.FrontendSubnetIdB
+        FrontendSecurityGroupId: !GetAtt NetworkStack.Outputs.FrontendSecurityGroupId
+
+  LoadBalancerStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployApplicationCondition
+    DependsOn: ComputeStack
+    Properties:
+      TemplateURL: ./04-loadbalancer.yaml
+      Parameters:
+        SecurityVpcCidr: !GetAtt NetworkStack.Outputs.SecurityVpcCidr
+
+Outputs:
+  ApplicationLoadBalancerDnsName:
+    Condition: DeployApplicationCondition
+    Description: DNS name of the application load balancer
+    Value: !GetAtt LoadBalancerStack.Outputs.ApplicationLoadBalancerDnsName
+  ApplicationLoadBalancerUrl:
+    Condition: DeployApplicationCondition
+    Description: URL of the application
+    Value: !Sub http://${LoadBalancerStack.Outputs.ApplicationLoadBalancerDnsName}
+  EksClusterName:
+    Condition: DeployApplicationCondition
+    Description: Name of the Amazon EKS cluster
+    Value: !GetAtt ComputeStack.Outputs.EksClusterName
+  NginxServiceName:
+    Condition: DeployApplicationCondition
+    Description: Kubernetes NGINX service name
+    Value: !GetAtt ComputeStack.Outputs.NginxServiceName
+  NginxNodePort:
+    Condition: DeployApplicationCondition
+    Description: NodePort exposed to the ALB
+    Value: !GetAtt ComputeStack.Outputs.NginxNodePort
