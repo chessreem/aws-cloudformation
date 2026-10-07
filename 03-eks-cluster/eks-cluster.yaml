@@ -148,6 +148,16 @@ Resources:
         MinSize: 1
         MaxSize: 1
 
+  NodePortIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EKSCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 30080
+      ToPort: 30080
+      CidrIp: 0.0.0.0/0
+      Description: Allow NodePort 30080 from anywhere to reach the nginx.yaml deployment
+
 Outputs:
   ClusterName:
     Description: EKS cluster name
