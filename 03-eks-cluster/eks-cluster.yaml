@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: One-VPC Amazon EKS cluster with one t3.medium worker node in a public subnet
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: simple-eks-cluster
+    Description: Name of the EKS cluster
+
+  KubernetesVersion:
+    Type: String
+    Default: '1.36'
+    Description: Kubernetes version for the EKS control plane
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterName}-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterName}-public-subnet
+
+  PrivateControlPlaneSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterName}-private-subnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterName}-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PublicSubnet
+          - !Ref PrivateControlPlaneSubnet
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: true
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+
+  EKSNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn:
+      - PublicDefaultRoute
+      - PublicSubnetRouteTableAssociation
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub ${ClusterName}-nodes
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      Subnets:
+        - !Ref PublicSubnet
+      AmiType: AL2023_x86_64_STANDARD
+      CapacityType: ON_DEMAND
+      DiskSize: 20
+      InstanceTypes:
+        - t3.medium
+      ScalingConfig:
+        DesiredSize: 1
+        MinSize: 1
+        MaxSize: 1
+
+  NodePortIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EKSCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 30080
+      ToPort: 30080
+      CidrIp: 0.0.0.0/0
+      Description: Allow NodePort 30080 from anywhere to reach the nginx.yaml deployment
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name
+    Value: !Ref EKSCluster
+
+  VPCId:
+    Description: VPC containing the EKS cluster
+    Value: !Ref VPC
+
+  PublicSubnetId:
+    Description: Public subnet containing the worker node
+    Value: !Ref PublicSubnet
